@@ -1,0 +1,53 @@
+# Python 바이트 코드 / 캐시 파일
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 가상 환경
+venv/
+env/
+ENV/
+.env
+
+# 로그 파일
+*.log
+
+# 출력 파일
+*.xlsx
+*.xls
+*.csv
+
+# 개인 인증 정보
+credentials.py
+credentils2.py
+credentials.json
+token.json
+
+# IDE 설정
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 빌드 파일
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 기타
+.DS_Store
+Thumbs.db 
