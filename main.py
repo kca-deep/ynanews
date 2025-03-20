@@ -16,6 +16,7 @@ import time
 import traceback
 import logging
 from tqdm import tqdm
+import tiktoken  # 토큰 계산을 위한 OpenAI 라이브러리
 
 # Gmail API 관련 모듈
 from email.mime.multipart import MIMEMultipart
@@ -24,6 +25,103 @@ from email.mime.application import MIMEApplication
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+
+
+# OpenAI API 사용량 추적 및 비용 계산 클래스
+class OpenAIUsageTracker:
+    def __init__(self, exchange_rate=1480):
+        """
+        OpenAI API 사용량 추적 및 비용 계산 클래스 초기화
+
+        Args:
+            exchange_rate: 달러 대 원화 환율 (기본값: 1480원)
+        """
+        self.exchange_rate = exchange_rate
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.total_requests = 0
+
+        # GPT-4o-mini 모델 가격 설정 (달러/100만 토큰)
+        self.input_price_per_million = 0.15  # 100만 토큰당 0.15 달러
+        self.output_price_per_million = 0.60  # 100만 토큰당 0.60 달러
+
+        # 토큰 계산을 위한 인코더 초기화
+        try:
+            self.encoder = tiktoken.encoding_for_model("gpt-4o-mini")
+        except:
+            self.encoder = tiktoken.get_encoding("cl100k_base")  # 대체 인코더
+            logging.warning(
+                "gpt-4o-mini 인코더를 로드할 수 없어 cl100k_base를 대신 사용합니다."
+            )
+
+    def count_tokens(self, text):
+        """문자열의 토큰 수를 계산합니다."""
+        if not text:
+            return 0
+        return len(self.encoder.encode(text))
+
+    def track_request(self, messages):
+        """API 요청의 토큰 사용량을 추적합니다."""
+        input_tokens = sum(
+            self.count_tokens(msg.get("content", "")) for msg in messages
+        )
+        self.total_input_tokens += input_tokens
+        self.total_requests += 1
+        return input_tokens
+
+    def track_response(self, response_text):
+        """API 응답의 토큰 사용량을 추적합니다."""
+        output_tokens = self.count_tokens(response_text)
+        self.total_output_tokens += output_tokens
+        return output_tokens
+
+    def calculate_cost(self):
+        """현재까지의 API 사용량 비용을 계산합니다."""
+        # 입력 토큰 비용 (달러)
+        input_cost_usd = (
+            self.total_input_tokens / 1000000
+        ) * self.input_price_per_million
+        # 출력 토큰 비용 (달러)
+        output_cost_usd = (
+            self.total_output_tokens / 1000000
+        ) * self.output_price_per_million
+        # 총 비용 (달러)
+        total_cost_usd = input_cost_usd + output_cost_usd
+
+        # 원화로 변환
+        input_cost_krw = input_cost_usd * self.exchange_rate
+        output_cost_krw = output_cost_usd * self.exchange_rate
+        total_cost_krw = total_cost_usd * self.exchange_rate
+
+        return {
+            "input_tokens": self.total_input_tokens,
+            "output_tokens": self.total_output_tokens,
+            "total_tokens": self.total_input_tokens + self.total_output_tokens,
+            "total_requests": self.total_requests,
+            "input_cost_usd": input_cost_usd,
+            "output_cost_usd": output_cost_usd,
+            "total_cost_usd": total_cost_usd,
+            "input_cost_krw": input_cost_krw,
+            "output_cost_krw": output_cost_krw,
+            "total_cost_krw": total_cost_krw,
+        }
+
+    def log_usage(self):
+        """현재까지의 API 사용량 및 비용을 로그에 기록합니다."""
+        cost_data = self.calculate_cost()
+        logging.info("===== OpenAI API 사용량 및 비용 =====")
+        logging.info(f"총 요청 수: {cost_data['total_requests']:,}회")
+        logging.info(
+            f"입력 토큰: {cost_data['input_tokens']:,}개 (${cost_data['input_cost_usd']:.6f}, ₩{cost_data['input_cost_krw']:.2f})"
+        )
+        logging.info(
+            f"출력 토큰: {cost_data['output_tokens']:,}개 (${cost_data['output_cost_usd']:.6f}, ₩{cost_data['output_cost_krw']:.2f})"
+        )
+        logging.info(
+            f"전체 토큰: {cost_data['total_tokens']:,}개 (${cost_data['total_cost_usd']:.6f}, ₩{cost_data['total_cost_krw']:.2f})"
+        )
+        logging.info("====================================")
+        return cost_data
 
 
 # ANSI 색상 코드 기반의 커스텀 Formatter 정의
@@ -71,6 +169,9 @@ def main():
         if keywords_env
         else ["ICT", "AI"]
     )
+
+    # OpenAI API 사용량 추적기 초기화 (환율: 1$=1480원)
+    usage_tracker = OpenAIUsageTracker(exchange_rate=1480)
 
     logging.info("OpenAI API Key Loaded: %s", bool(OPENAI_API_KEY))
     logging.info("검색 키워드: %s", keyword_list)
@@ -150,15 +251,21 @@ def main():
     def summarize_text(text):
         truncated_text = text if len(text) < 1000 else text[:1000]
         prompt = f"다음 뉴스 기사 본문을 간략하게 요약해줘. 요약은 3문장 이내로 작성해줘:\n\n{truncated_text}"
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an assistant that summarizes news articles in Korean.",
+            },
+            {"role": "user", "content": prompt},
+        ]
+
+        # 요청 토큰 추적
+        input_tokens = usage_tracker.track_request(messages)
+        logging.debug(f"요약 요청 입력 토큰: {input_tokens}개")
+
         data = {
             "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are an assistant that summarizes news articles in Korean.",
-                },
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "temperature": 0.3,
         }
         req_headers = {
@@ -177,6 +284,11 @@ def main():
             return ""
         result = response.json()
         summary = result["choices"][0]["message"]["content"].strip()
+
+        # 응답 토큰 추적
+        output_tokens = usage_tracker.track_response(summary)
+        logging.debug(f"요약 응답 출력 토큰: {output_tokens}개")
+
         return summary
 
     # 4. 키워드 검사 함수
@@ -231,15 +343,21 @@ def main():
             f'기사 제목1: "{title1}"\n기사 제목2: "{title2}"\n'
             "답변은 순수한 숫자(예: 95)만 출력해줘."
         )
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an assistant that calculates similarity percentage between two texts.",
+            },
+            {"role": "user", "content": prompt},
+        ]
+
+        # 요청 토큰 추적
+        input_tokens = usage_tracker.track_request(messages)
+        logging.debug(f"유사도 계산 요청 입력 토큰: {input_tokens}개")
+
         data = {
             "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are an assistant that calculates similarity percentage between two texts.",
-                },
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "temperature": 0.0,
         }
         req_headers = {
@@ -273,6 +391,11 @@ def main():
 
                 result = response.json()
                 answer = result["choices"][0]["message"]["content"].strip()
+
+                # 응답 토큰 추적
+                output_tokens = usage_tracker.track_response(answer)
+                logging.debug(f"유사도 계산 응답 출력 토큰: {output_tokens}개")
+
                 match = re.search(r"(\d+(\.\d+)?)", answer)
                 if match:
                     similarity = float(match.group(1))
@@ -390,6 +513,23 @@ def main():
 
     # 13. 최종 결과를 엑셀로 저장하고, 파일명을 반환
     output_filename = save_to_excel(rows, table_headers)
+
+    # 프로그램 종료 전 API 사용량 및 비용 로깅
+    usage_data = usage_tracker.log_usage()
+
+    # 메일 발송 정보에 API 사용량 및 비용 정보 추가
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    email_subject = f"YNA 뉴스 결과 - {today_str}"
+    email_body = (
+        f"오늘 날짜: {today_str}\n"
+        f"검색 키워드: {', '.join(keyword_list)}\n"
+        f"총 뉴스 기사 수: {len(filtered_articles)}개\n\n"
+        f"OpenAI API 사용량:\n"
+        f"- 입력 토큰: {usage_data['input_tokens']:,}개 (${usage_data['input_cost_usd']:.6f}, ₩{usage_data['input_cost_krw']:.2f})\n"
+        f"- 출력 토큰: {usage_data['output_tokens']:,}개 (${usage_data['output_cost_usd']:.6f}, ₩{usage_data['output_cost_krw']:.2f})\n"
+        f"- 전체 토큰: {usage_data['total_tokens']:,}개 (${usage_data['total_cost_usd']:.6f}, ₩{usage_data['total_cost_krw']:.2f})\n\n"
+        "첨부된 엑셀 파일을 확인해 주세요."
+    )
 
     # 14. Gmail API를 이용해 다수의 수신자에게 메일 발송 (엑셀 파일 첨부)
     def send_email_with_attachment(subject, body, attachment_filename):
@@ -515,6 +655,10 @@ def main():
         f"오늘 날짜: {today_str}\n"
         f"검색 키워드: {', '.join(keyword_list)}\n"
         f"총 뉴스 기사 수: {len(filtered_articles)}개\n\n"
+        f"OpenAI API 사용량:\n"
+        f"- 입력 토큰: {usage_data['input_tokens']:,}개 (${usage_data['input_cost_usd']:.6f}, ₩{usage_data['input_cost_krw']:.2f})\n"
+        f"- 출력 토큰: {usage_data['output_tokens']:,}개 (${usage_data['output_cost_usd']:.6f}, ₩{usage_data['output_cost_krw']:.2f})\n"
+        f"- 전체 토큰: {usage_data['total_tokens']:,}개 (${usage_data['total_cost_usd']:.6f}, ₩{usage_data['total_cost_krw']:.2f})\n\n"
         "첨부된 엑셀 파일을 확인해 주세요."
     )
 
