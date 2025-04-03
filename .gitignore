@@ -11,19 +11,25 @@ env/
 ENV/
 .env
 
-# 로그 파일
+# 로그 파일 및 폴더
 *.log
+logs/
 
-# 출력 파일
+# 출력 파일 및 폴더
 *.xlsx
 *.xls
 *.csv
+output/
 
 # 개인 인증 정보
 credentials.py
 credentils2.py
 credentials.json
 token.json
+# 토큰 백업 파일
+*.backup.*
+*_token.json
+client_secret.json
 
 # IDE 설정
 .idea/
